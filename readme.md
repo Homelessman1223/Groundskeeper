@@ -1,6 +1,4 @@
-# Nukes the whole script 
-# YES
+# Nukes the whole game and script 
+YES.
 
-# +
-
-# We used ai to do this for us btw
+AI used all of our tokens to make this W claude
