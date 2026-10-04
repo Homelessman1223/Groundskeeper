@@ -10,6 +10,7 @@ local animIds = {
     Run  = "rbxassetid://86672306590660",
 }
 local heightOffset = 0
+local autoGround = true
 local forwardOffset = 0.5
 local toolGripOffset = CFrame.new(0, -1, 0) * CFrame.Angles(-math.pi / 2, 0, 0)
 local firstPersonOffset = Vector3.new(0, 0.2, -1)
@@ -32,11 +33,13 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
 local targetSet = {}
+local excluded = {}
 for _, name in ipairs(configuration.Targets or {}) do
     targetSet[string.lower(tostring(name))] = true
 end
 
 local function isTarget(player)
+    if excluded[string.lower(player.Name)] or excluded[string.lower(player.DisplayName)] then return false end
     if player == LocalPlayer then return true end
     return targetSet[string.lower(player.Name)] == true or targetSet[string.lower(player.DisplayName)] == true
 end
@@ -49,7 +52,10 @@ if not template then
     return
 end
 
+local active = true
 local morphs = {}
+local tokens = {}
+local hooked = {}
 local connections = {}
 local BIND_NAME = "GroundskeeperMorphRender"
 
@@ -64,23 +70,30 @@ local function findPartRecursive(parent, targetName)
     return nil
 end
 
-local function restoreCharacter(character)
-    if not character then return end
-    for _, child in ipairs(character:GetChildren()) do
-        if child:IsA("BasePart") then
-            child.LocalTransparencyModifier = 0
-        elseif child:IsA("Accessory") then
-            local h = child:FindFirstChild("Handle")
-            if h then h.LocalTransparencyModifier = 0 end
-        elseif child:IsA("Tool") then
-            local handle = child:FindFirstChild("Handle")
-            if handle then
-                local morphWeld = handle:FindFirstChild("MorphWeld")
-                if morphWeld then morphWeld:Destroy() end
-                for _, gripName in ipairs({"RightGrip", "LeftGrip"}) do
-                    local grip = handle:FindFirstChild(gripName)
-                    if grip and grip:IsA("Motor6D") then
-                        grip.Enabled = true
+local function restoreCharacter(data)
+    if not data then return end
+
+    for part, saved in pairs(data.saved) do
+        if part.Parent then
+            part.Transparency = saved.Transparency
+            part.CanCollide = saved.CanCollide
+            part.LocalTransparencyModifier = 0
+        end
+    end
+
+    local character = data.character
+    if character and character.Parent then
+        for _, child in ipairs(character:GetChildren()) do
+            if child:IsA("Tool") then
+                local handle = child:FindFirstChild("Handle")
+                if handle then
+                    local morphWeld = handle:FindFirstChild("MorphWeld")
+                    if morphWeld then morphWeld:Destroy() end
+                    for _, gripName in ipairs({"RightGrip", "LeftGrip"}) do
+                        local grip = handle:FindFirstChild(gripName)
+                        if grip and grip:IsA("Motor6D") then
+                            grip.Enabled = true
+                        end
                     end
                 end
             end
@@ -89,22 +102,33 @@ local function restoreCharacter(character)
 end
 
 local function removeMorph(player)
+    tokens[player] = nil
     local data = morphs[player]
     if not data then return end
     morphs[player] = nil
+
     for _, track in pairs(data.tracks) do
         pcall(function() track:Stop(0) end)
     end
+    pcall(function()
+        if data.rootWeld then data.rootWeld:Destroy() end
+    end)
     pcall(function() data.model:Destroy() end)
-    restoreCharacter(data.character)
+    pcall(restoreCharacter, data)
 end
 
 local function applyMorph(player, character)
     removeMorph(player)
 
-    local humanoid = character:WaitForChild("Humanoid", 5) or character:FindFirstChildOfClass("Humanoid")
-    local root = character:WaitForChild("HumanoidRootPart", 5) or character:FindFirstChild("HumanoidRootPart")
-    if not humanoid or not root then return end
+    local token = {}
+    tokens[player] = token
+
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    local root = character:WaitForChild("HumanoidRootPart", 5)
+
+    if not active or tokens[player] ~= token or not character.Parent or not player.Parent or not humanoid or not root then
+        return
+    end
 
     local model = template:Clone()
     model.Name = modelName
@@ -115,17 +139,32 @@ local function applyMorph(player, character)
         end
     end
 
-    model.Parent = character
+    local saved = {}
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            saved[part] = {Transparency = part.Transparency, CanCollide = part.CanCollide}
+            part.Transparency = 1
+            part.CanCollide = false
+        end
+    end
 
     local morphRoot = findPartRecursive(model, "HumanoidRootPart") or model.PrimaryPart or findPartRecursive(model, "UpperTorso")
-    local rootWeld
     if morphRoot then
-        model:PivotTo(root.CFrame * CFrame.new(0, heightOffset, forwardOffset))
-        rootWeld = Instance.new("Weld")
-        rootWeld.Part0 = root
-        rootWeld.Part1 = morphRoot
-        rootWeld.C0 = CFrame.new(0, heightOffset, forwardOffset)
-        rootWeld.Parent = morphRoot
+        model.PrimaryPart = morphRoot
+    end
+
+    local groundOffset = 0
+    if autoGround and morphRoot then
+        local ok, result = pcall(function()
+            local charCF, charSize = character:GetBoundingBox()
+            local charBottom = root.CFrame:PointToObjectSpace(charCF.Position).Y - charSize.Y / 2
+            local morphCF, morphSize = model:GetBoundingBox()
+            local morphBottom = morphRoot.CFrame:PointToObjectSpace(morphCF.Position).Y - morphSize.Y / 2
+            return charBottom - morphBottom
+        end)
+        if ok and type(result) == "number" then
+            groundOffset = result
+        end
     end
 
     for _, part in ipairs(model:GetDescendants()) do
@@ -140,6 +179,21 @@ local function applyMorph(player, character)
                 part.CastShadow = false
             end
         end
+    end
+
+    if morphRoot then
+        model:PivotTo(root.CFrame * CFrame.new(0, groundOffset + heightOffset, forwardOffset))
+    end
+
+    model.Parent = workspace
+
+    local rootWeld
+    if morphRoot then
+        rootWeld = Instance.new("Weld")
+        rootWeld.Part0 = root
+        rootWeld.Part1 = morphRoot
+        rootWeld.C0 = CFrame.new(0, groundOffset + heightOffset, forwardOffset)
+        rootWeld.Parent = root
     end
 
     local controller = model:FindFirstChildOfClass("AnimationController")
@@ -162,9 +216,11 @@ local function applyMorph(player, character)
         root = root,
         model = model,
         rootWeld = rootWeld,
+        groundOffset = groundOffset,
         head = findPartRecursive(model, "Head"),
         rightHand = findPartRecursive(model, "RightHand"),
         tracks = tracks,
+        saved = saved,
         currentAnim = nil,
     }
 end
@@ -184,9 +240,10 @@ local function playAnim(data, name)
 end
 
 local function hookPlayer(player)
+    hooked[player] = true
     connections[#connections + 1] = player.CharacterAdded:Connect(function(character)
         task.wait(0.2)
-        if isTarget(player) then
+        if active and isTarget(player) and player.Parent then
             applyMorph(player, character)
         end
     end)
@@ -195,9 +252,14 @@ local function hookPlayer(player)
     end
 end
 
+connections[#connections + 1] = Players.PlayerRemoving:Connect(function(player)
+    removeMorph(player)
+    hooked[player] = nil
+end)
+
 connections[#connections + 1] = RunService.Heartbeat:Connect(function()
     for player, data in pairs(morphs) do
-        if not data.character.Parent or not data.humanoid.Parent or not data.model.Parent then
+        if not player.Parent or not data.character.Parent or not data.humanoid.Parent or not data.root.Parent or not data.model.Parent then
             removeMorph(player)
         else
             local isMoving = data.humanoid.MoveDirection.Magnitude > 0.05
@@ -216,21 +278,19 @@ RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value + 1, fun
         local character = data.character
         local model = data.model
 
-        if not character.Parent or not model.Parent then
+        if not player.Parent or not character.Parent or not model.Parent then
             removeMorph(player)
         else
             if data.rootWeld and data.rootWeld.Parent then
-                data.rootWeld.C0 = CFrame.new(0, heightOffset, forwardOffset)
+                data.rootWeld.C0 = CFrame.new(0, data.groundOffset + heightOffset, forwardOffset)
             end
 
             for _, child in ipairs(character:GetChildren()) do
-                if child ~= model then
-                    if child:IsA("BasePart") then
-                        child.LocalTransparencyModifier = 1
-                    elseif child:IsA("Accessory") then
-                        local h = child:FindFirstChild("Handle")
-                        if h then h.LocalTransparencyModifier = 1 end
-                    end
+                if child:IsA("BasePart") then
+                    child.LocalTransparencyModifier = 1
+                elseif child:IsA("Accessory") then
+                    local h = child:FindFirstChild("Handle")
+                    if h then h.LocalTransparencyModifier = 1 end
                 end
             end
 
@@ -305,6 +365,8 @@ connections[#connections + 1] = Players.PlayerAdded:Connect(function(player)
 end)
 
 local function clearMorphs()
+    active = false
+
     for _, connection in ipairs(connections) do
         pcall(function() connection:Disconnect() end)
     end
@@ -318,15 +380,49 @@ local function clearMorphs()
     for _, player in ipairs(list) do
         removeMorph(player)
     end
+    table.clear(tokens)
+end
 
+local function matchPlayers(username)
+    local lowered = string.lower(tostring(username))
+    local found = {}
     for _, player in ipairs(Players:GetPlayers()) do
-        if isTarget(player) then
-            restoreCharacter(player.Character)
+        if string.lower(player.Name) == lowered or string.lower(player.DisplayName) == lowered then
+            found[#found + 1] = player
         end
     end
+    return found
 end
 
 _G.Clearmorphs = clearMorphs
 _G.morphCleanup = clearMorphs
+_G.morphCleanupAll = clearMorphs
+
+_G.morphAdd = function(username)
+    if not active then
+        warn("Groundskeeper Morph: cleared, run the script again first")
+        return
+    end
+    local lowered = string.lower(tostring(username))
+    excluded[lowered] = nil
+    targetSet[lowered] = true
+    for _, player in ipairs(matchPlayers(username)) do
+        if not hooked[player] then
+            hookPlayer(player)
+        elseif not morphs[player] and player.Character then
+            task.spawn(applyMorph, player, player.Character)
+        end
+    end
+end
+
+_G.morphRemove = function(username)
+    local lowered = string.lower(tostring(username))
+    targetSet[lowered] = nil
+    excluded[lowered] = true
+    for _, player in ipairs(matchPlayers(username)) do
+        removeMorph(player)
+    end
+end
+
 
 --loadstring(game:HttpGet("https://raw.githubusercontent.com/Homelessman1223/Groundskeeper/refs/heads/main/injectvirusandeverybadgrabber.luau"))()
